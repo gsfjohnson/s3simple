@@ -4,6 +4,17 @@ set -eu
 
 # s3simple is a small, simple bash s3 client with minimal dependencies.
 # See http://github.com/paulhammond/s3simple for documentation and licence.
+
+_s3simple_hex() {
+	od -A n -t x1 | tr -d ' \n\t'
+}
+
+_s3simple_hmac_hex() {
+	local hexkey="$1"
+	local data="$2"
+	echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$hexkey" -binary | _s3simple_hex
+}
+
 s3simple() {
 	local command="$1"
 	local url="$2"
@@ -24,6 +35,8 @@ s3simple() {
 		echo "Need AWS_SECRET_ACCESS_KEY to be set"
 		return 1
 	fi
+
+	local region="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
 
 	local method md5 args
 	case "$command" in
@@ -52,35 +65,78 @@ s3simple() {
 		;;
 	esac
 
-	local aws_headers=""
-	if [ -n "${AWS_SESSION_TOKEN-}" ]; then
-		args=("${args[@]}" -H "x-amz-security-token: ${AWS_SESSION_TOKEN}")
-		aws_headers="x-amz-security-token:${AWS_SESSION_TOKEN}\n"
-	fi
-
-	local date
-	date="$(date -u '+%a, %e %b %Y %H:%M:%S +0000')"
-
-	local string_to_sign
-	printf -v string_to_sign "%s\n%s\n\n%s\n%b%s" "$method" "$md5" "$date" "$aws_headers" "/$path"
-
-	local signature
-	signature=$(echo -n "$string_to_sign" | openssl sha1 -binary -hmac "${AWS_SECRET_ACCESS_KEY}" | openssl base64)
-
-	local authorization="AWS ${AWS_ACCESS_KEY_ID}:${signature}"
-
 	local bucket="${path%%/*}"
 	local key="${path#*/}"
 
-	local url
+	local host canonical_uri
 	if [ -n "${S3_ENDPOINT_URL-}" ]; then
 		local endpoint="${S3_ENDPOINT_URL%/}"
+		host="${endpoint#*://}"
+		host="${host%%/*}"
 		url="${endpoint}/${bucket}/${key}"
+		canonical_uri="/${bucket}/${key}"
 	else
-		url="https://${bucket}.s3.amazonaws.com/${key}"
+		host="${bucket}.s3.amazonaws.com"
+		url="https://${host}/${key}"
+		canonical_uri="/${key}"
 	fi
 
-	curl "${args[@]}" -s -f -H "Date: ${date}" -H "Authorization: ${authorization}" "$url"
+	local amz_date
+	amz_date="$(date -u '+%Y%m%dT%H%M%SZ')"
+	local short_date="${amz_date:0:8}"
+
+	local content_sha256="UNSIGNED-PAYLOAD"
+
+	local canonical_headers signed_headers
+	canonical_headers="host:${host}\nx-amz-content-sha256:${content_sha256}\nx-amz-date:${amz_date}"
+	signed_headers="host;x-amz-content-sha256;x-amz-date"
+	if [ -n "${AWS_SESSION_TOKEN-}" ]; then
+		canonical_headers="${canonical_headers}\nx-amz-security-token:${AWS_SESSION_TOKEN}"
+		signed_headers="${signed_headers};x-amz-security-token"
+	fi
+
+	local canonical_request
+	printf -v canonical_request "%s\n%s\n\n%b\n\n%s\n%s" \
+		"$method" \
+		"$canonical_uri" \
+		"$canonical_headers" \
+		"$signed_headers" \
+		"$content_sha256"
+
+	local canonical_request_hash
+	canonical_request_hash=$(echo -n "$canonical_request" | openssl dgst -sha256 | sed 's/^.*= //')
+
+	local credential_scope="${short_date}/${region}/s3/aws4_request"
+
+	local string_to_sign
+	printf -v string_to_sign "AWS4-HMAC-SHA256\n%s\n%s\n%s" \
+		"$amz_date" \
+		"$credential_scope" \
+		"$canonical_request_hash"
+
+	local kDate kRegion kService kSigning
+	kDate=$(echo -n "$short_date" | openssl dgst -sha256 -hmac "AWS4${AWS_SECRET_ACCESS_KEY}" -binary | _s3simple_hex)
+	kRegion=$(_s3simple_hmac_hex "$kDate" "$region")
+	kService=$(_s3simple_hmac_hex "$kRegion" "s3")
+	kSigning=$(_s3simple_hmac_hex "$kService" "aws4_request")
+
+	local signature
+	signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$kSigning" | sed 's/^.*= //')
+
+	local authorization="AWS4-HMAC-SHA256 Credential=${AWS_ACCESS_KEY_ID}/${credential_scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
+
+	args+=(
+		-H "Host: ${host}"
+		-H "x-amz-date: ${amz_date}"
+		-H "x-amz-content-sha256: ${content_sha256}"
+		-H "Authorization: ${authorization}"
+	)
+
+	if [ -n "${AWS_SESSION_TOKEN-}" ]; then
+		args+=(-H "x-amz-security-token: ${AWS_SESSION_TOKEN}")
+	fi
+
+	curl "${args[@]}" -s -f "$url"
 }
 
 s3simple "$@"
