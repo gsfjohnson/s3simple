@@ -22,7 +22,8 @@ possible, but it is not implemented here.
 
 1. Download the [s3simple](s3simple) script somewhere.
 2. Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` and optionally
-`AWS_SESSION_TOKEN` environment variables.
+`AWS_SESSION_TOKEN` environment variables. To use an S3-compatible endpoint
+(e.g. MinIO, Ceph, Backblaze B2), set `S3_ENDPOINT_URL`.
 3. Run `s3simple` with a method, an `s3://` url and, optionally, a local
 filename.
 
@@ -44,6 +45,10 @@ For example:
 
     # get a file and pipe to tar
     s3simple get s3://mybucket/foo.tgz | tar -zx
+
+    # use a custom S3-compatible endpoint
+    export S3_ENDPOINT_URL=https://minio.local:9000
+    ./s3simple get s3://mybucket/myfile.txt myfile.txt
 
 You are encouraged to copy the s3simple function into your bash scripts and edit
 it to suit your needs.

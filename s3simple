@@ -72,7 +72,15 @@ s3simple() {
 	local bucket="${path%%/*}"
 	local key="${path#*/}"
 
-	curl "${args[@]}" -s -f -H "Date: ${date}" -H "Authorization: ${authorization}" "https://${bucket}.s3.amazonaws.com/${key}"
+	local url
+	if [ -n "${S3_ENDPOINT_URL-}" ]; then
+		local endpoint="${S3_ENDPOINT_URL%/}"
+		url="${endpoint}/${bucket}/${key}"
+	else
+		url="https://${bucket}.s3.amazonaws.com/${key}"
+	fi
+
+	curl "${args[@]}" -s -f -H "Date: ${date}" -H "Authorization: ${authorization}" "$url"
 }
 
 s3simple "$@"
