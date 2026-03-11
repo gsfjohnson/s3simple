@@ -27,6 +27,12 @@ For example:
     # optionally provide a temporary session token
     export AWS_SESSION_TOKEN=wwww...
 
+    # list objects in a bucket
+    ./s3simple ls s3://mybucket
+
+    # list objects with a prefix
+    ./s3simple ls s3://mybucket/path/prefix
+
     # get a file
     ./s3simple get s3://mybucket/myfile.txt myfile.txt
 

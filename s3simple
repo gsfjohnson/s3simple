@@ -59,26 +59,53 @@ s3simple() {
 		md5="$(openssl md5 -binary "$file" | openssl base64)"
 		args=(-T "$file" -H "Content-MD5: $md5")
 		;;
+	ls)
+		method="GET"
+		md5=""
+		args=()
+		;;
 	*)
 		echo "Unsupported command"
 		return 1
 		;;
 	esac
 
-	local bucket="${path%%/*}"
-	local key="${path#*/}"
+	local bucket key canonical_querystring=""
+	if [ "$command" = "ls" ]; then
+		if [[ "$path" == */* ]]; then
+			bucket="${path%%/*}"
+			canonical_querystring="list-type=2&prefix=${path#*/}"
+		else
+			bucket="$path"
+			canonical_querystring="list-type=2"
+		fi
+		key=""
+	else
+		bucket="${path%%/*}"
+		key="${path#*/}"
+	fi
 
 	local host canonical_uri
 	if [ -n "${S3_ENDPOINT_URL-}" ]; then
 		local endpoint="${S3_ENDPOINT_URL%/}"
 		host="${endpoint#*://}"
 		host="${host%%/*}"
-		url="${endpoint}/${bucket}/${key}"
-		canonical_uri="/${bucket}/${key}"
+		if [ "$command" = "ls" ]; then
+			url="${endpoint}/${bucket}?${canonical_querystring}"
+			canonical_uri="/${bucket}"
+		else
+			url="${endpoint}/${bucket}/${key}"
+			canonical_uri="/${bucket}/${key}"
+		fi
 	else
 		host="${bucket}.s3.amazonaws.com"
-		url="https://${host}/${key}"
-		canonical_uri="/${key}"
+		if [ "$command" = "ls" ]; then
+			url="https://${host}/?${canonical_querystring}"
+			canonical_uri="/"
+		else
+			url="https://${host}/${key}"
+			canonical_uri="/${key}"
+		fi
 	fi
 
 	local amz_date
@@ -96,9 +123,10 @@ s3simple() {
 	fi
 
 	local canonical_request
-	printf -v canonical_request "%s\n%s\n\n%b\n\n%s\n%s" \
+	printf -v canonical_request "%s\n%s\n%s\n%b\n\n%s\n%s" \
 		"$method" \
 		"$canonical_uri" \
+		"$canonical_querystring" \
 		"$canonical_headers" \
 		"$signed_headers" \
 		"$content_sha256"
@@ -136,7 +164,11 @@ s3simple() {
 		args+=(-H "x-amz-security-token: ${AWS_SESSION_TOKEN}")
 	fi
 
-	curl "${args[@]}" -s -f "$url"
+	if [ "$command" = "ls" ]; then
+		curl "${args[@]}" -s -f "$url" | grep -o '<Key>[^<]*</Key>' | sed 's/<[^>]*>//g'
+	else
+		curl "${args[@]}" -s -f "$url"
+	fi
 }
 
 s3simple "$@"
