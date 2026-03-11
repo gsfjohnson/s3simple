@@ -97,6 +97,17 @@ s3simple() {
 			url="${endpoint}/${bucket}/${key}"
 			canonical_uri="/${bucket}/${key}"
 		fi
+	elif [[ "$bucket" == *.* ]]; then
+		# Bucket names with dots can't use virtual-hosted style (wildcard TLS cert
+		# *.s3.amazonaws.com doesn't cover multi-label names like a.b.s3.amazonaws.com)
+		host="s3.${region}.amazonaws.com"
+		if [ "$command" = "ls" ]; then
+			url="https://${host}/${bucket}?${canonical_querystring}"
+			canonical_uri="/${bucket}"
+		else
+			url="https://${host}/${bucket}/${key}"
+			canonical_uri="/${bucket}/${key}"
+		fi
 	else
 		host="${bucket}.s3.amazonaws.com"
 		if [ "$command" = "ls" ]; then
