@@ -33,6 +33,9 @@ For example:
     # list objects with a prefix
     ./s3simple ls s3://mybucket/path/prefix
 
+    # list with details (size, timestamp, storage class, etag)
+    ./s3simple ll s3://mybucket
+
     # get a file
     ./s3simple get s3://mybucket/myfile.txt myfile.txt
 

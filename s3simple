@@ -38,7 +38,7 @@ s3simple() {
 
 	local region="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
 
-	local method md5 args
+	local method md5 args listing=""
 	case "$command" in
 	get)
 		method="GET"
@@ -59,10 +59,11 @@ s3simple() {
 		md5="$(openssl md5 -binary "$file" | openssl base64)"
 		args=(-T "$file" -H "Content-MD5: $md5")
 		;;
-	ls)
+	ls | ll)
 		method="GET"
 		md5=""
 		args=()
+		listing=1
 		;;
 	*)
 		echo "Unsupported command"
@@ -71,7 +72,7 @@ s3simple() {
 	esac
 
 	local bucket key canonical_querystring=""
-	if [ "$command" = "ls" ]; then
+	if [ -n "$listing" ]; then
 		if [[ "$path" == */* ]]; then
 			bucket="${path%%/*}"
 			canonical_querystring="list-type=2&prefix=${path#*/}"
@@ -90,7 +91,7 @@ s3simple() {
 		local endpoint="${S3_ENDPOINT_URL%/}"
 		host="${endpoint#*://}"
 		host="${host%%/*}"
-		if [ "$command" = "ls" ]; then
+		if [ -n "$listing" ]; then
 			url="${endpoint}/${bucket}?${canonical_querystring}"
 			canonical_uri="/${bucket}"
 		else
@@ -101,7 +102,7 @@ s3simple() {
 		# Bucket names with dots can't use virtual-hosted style (wildcard TLS cert
 		# *.s3.amazonaws.com doesn't cover multi-label names like a.b.s3.amazonaws.com)
 		host="s3.${region}.amazonaws.com"
-		if [ "$command" = "ls" ]; then
+		if [ -n "$listing" ]; then
 			url="https://${host}/${bucket}?${canonical_querystring}"
 			canonical_uri="/${bucket}"
 		else
@@ -110,7 +111,7 @@ s3simple() {
 		fi
 	else
 		host="${bucket}.s3.amazonaws.com"
-		if [ "$command" = "ls" ]; then
+		if [ -n "$listing" ]; then
 			url="https://${host}/?${canonical_querystring}"
 			canonical_uri="/"
 		else
@@ -175,7 +176,21 @@ s3simple() {
 		args+=(-H "x-amz-security-token: ${AWS_SESSION_TOKEN}")
 	fi
 
-	if [ "$command" = "ls" ]; then
+	if [ "$command" = "ll" ]; then
+		curl "${args[@]}" -s -f "$url" | tr '<' '\n' | awk '
+			function human(b) {
+				if (b >= 1073741824) return sprintf("%.1f G", b/1073741824)
+				if (b >= 1048576)    return sprintf("%.1f M", b/1048576)
+				if (b >= 1024)       return sprintf("%.1f K", b/1024)
+				return b "  "
+			}
+			/^Key>/          { gsub(/^Key>/, ""); key=$0 }
+			/^LastModified>/ { gsub(/^LastModified>/, ""); mod=$0 }
+			/^Size>/         { gsub(/^Size>/, ""); size=$0 }
+			/^StorageClass>/ { gsub(/^StorageClass>/, ""); sc=$0 }
+			/^\/Contents>/   { printf "%s  %6s  %-12s  %s\n", mod, human(size+0), sc, key }
+		'
+	elif [ "$command" = "ls" ]; then
 		curl "${args[@]}" -s -f "$url" | grep -o '<Key>[^<]*</Key>' | sed 's/<[^>]*>//g'
 	else
 		curl "${args[@]}" -s -f "$url"
