@@ -15,11 +15,98 @@ _s3simple_hmac_hex() {
 	echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$hexkey" -binary | _s3simple_hex
 }
 
+# Resolve host, canonical URI, and full URL for the request.
+# Sets caller variables: host, canonical_uri, url
+_s3simple_resolve_url() {
+	local bucket="$1" key="$2" listing="$3" qs="$4" region="$5"
+
+	local base sep
+	if [ -n "${S3_ENDPOINT_URL-}" ]; then
+		local endpoint="${S3_ENDPOINT_URL%/}"
+		host="${endpoint#*://}"
+		host="${host%%/*}"
+		base="${endpoint}/${bucket}"
+		canonical_uri="/${bucket}"
+		sep="?"
+	elif [[ "$bucket" == *.* ]]; then
+		# Bucket names with dots use path-style (wildcard TLS cert doesn't
+		# cover multi-label names like a.b.s3.amazonaws.com)
+		host="s3.${region}.amazonaws.com"
+		base="https://${host}/${bucket}"
+		canonical_uri="/${bucket}"
+		sep="?"
+	else
+		host="${bucket}.s3.amazonaws.com"
+		base="https://${host}"
+		canonical_uri="/"
+		sep="/?"
+	fi
+
+	if [ -n "$listing" ]; then
+		url="${base}${sep}${qs}"
+	else
+		url="${base}/${key}"
+		canonical_uri="${canonical_uri%/}/${key}"
+	fi
+}
+
+# Compute AWS SigV4 authorization header.
+# Sets caller variables: authorization, signed_headers
+_s3simple_sign() {
+	local method="$1" canonical_uri="$2" canonical_querystring="$3"
+	local host="$4" content_sha256="$5" region="$6" amz_date="$7"
+	local short_date="${amz_date:0:8}"
+
+	# Step 1: Build canonical headers
+	local canonical_headers
+	canonical_headers="host:${host}\nx-amz-content-sha256:${content_sha256}\nx-amz-date:${amz_date}"
+	signed_headers="host;x-amz-content-sha256;x-amz-date"
+	if [ -n "${AWS_SESSION_TOKEN-}" ]; then
+		canonical_headers="${canonical_headers}\nx-amz-security-token:${AWS_SESSION_TOKEN}"
+		signed_headers="${signed_headers};x-amz-security-token"
+	fi
+
+	# Step 2: Build canonical request and hash it
+	local canonical_request
+	printf -v canonical_request "%s\n%s\n%s\n%b\n\n%s\n%s" \
+		"$method" \
+		"$canonical_uri" \
+		"$canonical_querystring" \
+		"$canonical_headers" \
+		"$signed_headers" \
+		"$content_sha256"
+
+	local canonical_request_hash
+	canonical_request_hash=$(echo -n "$canonical_request" | openssl dgst -sha256 | sed 's/^.*= //')
+
+	# Step 3: Build string to sign
+	local credential_scope="${short_date}/${region}/s3/aws4_request"
+
+	local string_to_sign
+	printf -v string_to_sign "AWS4-HMAC-SHA256\n%s\n%s\n%s" \
+		"$amz_date" \
+		"$credential_scope" \
+		"$canonical_request_hash"
+
+	# Step 4: Derive signing key and compute signature
+	local kDate kRegion kService kSigning
+	kDate=$(echo -n "$short_date" | openssl dgst -sha256 -hmac "AWS4${AWS_SECRET_ACCESS_KEY}" -binary | _s3simple_hex)
+	kRegion=$(_s3simple_hmac_hex "$kDate" "$region")
+	kService=$(_s3simple_hmac_hex "$kRegion" "s3")
+	kSigning=$(_s3simple_hmac_hex "$kService" "aws4_request")
+
+	local signature
+	signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$kSigning" | sed 's/^.*= //')
+
+	authorization="AWS4-HMAC-SHA256 Credential=${AWS_ACCESS_KEY_ID}/${credential_scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
+}
+
 s3simple() {
 	local command="$1"
 	local url="$2"
 	local file="${3:--}"
 
+	# Validate inputs
 	if [ "${url:0:5}" != "s3://" ]; then
 		echo "Need an s3 url"
 		return 1
@@ -38,7 +125,9 @@ s3simple() {
 
 	local region="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
 
-	local method md5 args listing=""
+	# Parse command into HTTP method and curl args
+	local method md5 args
+	local listing=""
 	case "$command" in
 	get)
 		method="GET"
@@ -71,7 +160,9 @@ s3simple() {
 		;;
 	esac
 
-	local bucket key canonical_querystring=""
+	# Parse bucket and key from s3:// path
+	local bucket key
+	local canonical_querystring=""
 	if [ -n "$listing" ]; then
 		if [[ "$path" == */* ]]; then
 			bucket="${path%%/*}"
@@ -86,85 +177,19 @@ s3simple() {
 		key="${path#*/}"
 	fi
 
+	# Resolve host, URL, and canonical URI for the addressing style
 	local host canonical_uri
-	if [ -n "${S3_ENDPOINT_URL-}" ]; then
-		local endpoint="${S3_ENDPOINT_URL%/}"
-		host="${endpoint#*://}"
-		host="${host%%/*}"
-		if [ -n "$listing" ]; then
-			url="${endpoint}/${bucket}?${canonical_querystring}"
-			canonical_uri="/${bucket}"
-		else
-			url="${endpoint}/${bucket}/${key}"
-			canonical_uri="/${bucket}/${key}"
-		fi
-	elif [[ "$bucket" == *.* ]]; then
-		# Bucket names with dots can't use virtual-hosted style (wildcard TLS cert
-		# *.s3.amazonaws.com doesn't cover multi-label names like a.b.s3.amazonaws.com)
-		host="s3.${region}.amazonaws.com"
-		if [ -n "$listing" ]; then
-			url="https://${host}/${bucket}?${canonical_querystring}"
-			canonical_uri="/${bucket}"
-		else
-			url="https://${host}/${bucket}/${key}"
-			canonical_uri="/${bucket}/${key}"
-		fi
-	else
-		host="${bucket}.s3.amazonaws.com"
-		if [ -n "$listing" ]; then
-			url="https://${host}/?${canonical_querystring}"
-			canonical_uri="/"
-		else
-			url="https://${host}/${key}"
-			canonical_uri="/${key}"
-		fi
-	fi
+	_s3simple_resolve_url "$bucket" "$key" "$listing" "$canonical_querystring" "$region"
 
+	# Sign the request (AWS SigV4)
 	local amz_date
 	amz_date="$(date -u '+%Y%m%dT%H%M%SZ')"
-	local short_date="${amz_date:0:8}"
-
 	local content_sha256="UNSIGNED-PAYLOAD"
+	local authorization signed_headers
+	_s3simple_sign "$method" "$canonical_uri" "$canonical_querystring" \
+		"$host" "$content_sha256" "$region" "$amz_date"
 
-	local canonical_headers signed_headers
-	canonical_headers="host:${host}\nx-amz-content-sha256:${content_sha256}\nx-amz-date:${amz_date}"
-	signed_headers="host;x-amz-content-sha256;x-amz-date"
-	if [ -n "${AWS_SESSION_TOKEN-}" ]; then
-		canonical_headers="${canonical_headers}\nx-amz-security-token:${AWS_SESSION_TOKEN}"
-		signed_headers="${signed_headers};x-amz-security-token"
-	fi
-
-	local canonical_request
-	printf -v canonical_request "%s\n%s\n%s\n%b\n\n%s\n%s" \
-		"$method" \
-		"$canonical_uri" \
-		"$canonical_querystring" \
-		"$canonical_headers" \
-		"$signed_headers" \
-		"$content_sha256"
-
-	local canonical_request_hash
-	canonical_request_hash=$(echo -n "$canonical_request" | openssl dgst -sha256 | sed 's/^.*= //')
-
-	local credential_scope="${short_date}/${region}/s3/aws4_request"
-
-	local string_to_sign
-	printf -v string_to_sign "AWS4-HMAC-SHA256\n%s\n%s\n%s" \
-		"$amz_date" \
-		"$credential_scope" \
-		"$canonical_request_hash"
-
-	local kDate kRegion kService kSigning
-	kDate=$(echo -n "$short_date" | openssl dgst -sha256 -hmac "AWS4${AWS_SECRET_ACCESS_KEY}" -binary | _s3simple_hex)
-	kRegion=$(_s3simple_hmac_hex "$kDate" "$region")
-	kService=$(_s3simple_hmac_hex "$kRegion" "s3")
-	kSigning=$(_s3simple_hmac_hex "$kService" "aws4_request")
-
-	local signature
-	signature=$(echo -n "$string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$kSigning" | sed 's/^.*= //')
-
-	local authorization="AWS4-HMAC-SHA256 Credential=${AWS_ACCESS_KEY_ID}/${credential_scope}, SignedHeaders=${signed_headers}, Signature=${signature}"
-
+	# Build curl headers
 	args+=(
 		-H "Host: ${host}"
 		-H "x-amz-date: ${amz_date}"
@@ -176,7 +201,9 @@ s3simple() {
 		args+=(-H "x-amz-security-token: ${AWS_SESSION_TOKEN}")
 	fi
 
+	# Execute the request
 	if [ "$command" = "ll" ]; then
+		# Parse ListObjectsV2 XML into human-readable columns
 		curl "${args[@]}" -s -f "$url" | tr '<' '\n' | awk '
 			function human(b) {
 				if (b >= 1073741824) return sprintf("%.1f G", b/1073741824)
