@@ -243,7 +243,7 @@ s3simple() {
 	# Execute the request
 	if [ "$command" = "ll" ]; then
 		# Parse ListObjectsV2 XML into human-readable columns
-		curl "${args[@]}" -s -f "$url" | tr '<' '\n' | awk '
+		curl "${args[@]}" -sS -f "$url" | tr '<' '\n' | awk '
 			function human(b) {
 				if (b >= 1073741824) return sprintf("%.1f G", b/1073741824)
 				if (b >= 1048576)    return sprintf("%.1f M", b/1048576)
@@ -257,9 +257,11 @@ s3simple() {
 			/^\/Contents>/   { printf "%s  %6s  %-12s  %s\n", mod, human(size+0), sc, key }
 		'
 	elif [ "$command" = "ls" ]; then
-		curl "${args[@]}" -s -f "$url" | grep -o '<Key>[^<]*</Key>' | sed 's/<[^>]*>//g'
+		curl "${args[@]}" -sS -f "$url" | grep -o '<Key>[^<]*</Key>' | sed 's/<[^>]*>//g'
+	elif [ "$command" = "head" ]; then
+		curl "${args[@]}" -sS -f "$url"
 	else
-		curl "${args[@]}" -s -f "$url"
+		curl "${args[@]}" -f "$url"
 	fi
 }
 
