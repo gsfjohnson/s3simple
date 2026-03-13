@@ -255,7 +255,7 @@ s3simple() {
 			/^Size>/         { gsub(/^Size>/, ""); size=$0 }
 			/^StorageClass>/ { gsub(/^StorageClass>/, ""); sc=$0 }
 			/^\/Contents>/   { total+=size+0; count++; printf "%s  %6s  %-12s  %s\n", mod, human(size+0), sc, key }
-			END              { if (count) printf "%40s  %d files, %s total\n", "", count, human(total) }
+			END              { if (count) printf "  %d files, %s total\n", "", count, human(total) }
 		'
 	elif [ "$command" = "ls" ]; then
 		curl "${args[@]}" -sS -f "$url" | grep -o '<Key>[^<]*</Key>' | sed 's/<[^>]*>//g'
