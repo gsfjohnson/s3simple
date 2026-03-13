@@ -15,6 +15,34 @@ _s3simple_hmac_hex() {
 	echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$hexkey" -binary | _s3simple_hex
 }
 
+# Display usage information
+usage() {
+	cat << EOF
+Usage: s3simple <command> <s3://bucket/key> [file]
+
+Commands:
+  get  Download an object from S3
+  put  Upload a file to S3
+  ls   List objects in a bucket/prefix
+  ll   List objects with details (size, date, storage class)
+  head Get metadata for an object
+
+Environment Variables:
+  AWS_ACCESS_KEY_ID      - AWS access key (required)
+  AWS_SECRET_ACCESS_KEY  - AWS secret key (required)
+  AWS_DEFAULT_REGION     - AWS region (default: us-east-1)
+  AWS_REGION             - Alternative region setting
+  AWS_SESSION_TOKEN      - Temporary session token (optional)
+  S3_ENDPOINT_URL        - Custom S3 endpoint (optional, for S3-compatible services)
+
+Examples:
+  s3simple get s3://bucket/file.txt file.txt
+  s3simple put s3://bucket/file.txt file.txt
+  s3simple ls s3://bucket/
+  s3simple ll s3://bucket/prefix/
+EOF
+}
+
 # Resolve host, canonical URI, and full URL for the request.
 # Sets caller variables: host, canonical_uri, url
 _s3simple_resolve_url() {
@@ -102,13 +130,19 @@ _s3simple_sign() {
 }
 
 s3simple() {
+	if [ $# -lt 2 ]; then
+		echo "Error: Missing required arguments" >&2
+		usage >&2
+		return 1
+	fi
+
 	local command="$1"
 	local url="$2"
 	local file="${3:--}"
 
 	# Validate inputs
 	if [ "${url:0:5}" != "s3://" ]; then
-		echo "Need an s3 url"
+		echo "Parameter 2 must be an s3 url, e.g. s3://bucket/filename.ext"
 		return 1
 	fi
 	local path="${url:5}"
@@ -155,7 +189,10 @@ s3simple() {
 		listing=1
 		;;
 	*)
-		echo "Unsupported command"
+		echo "Error: Unsupported command: $command" >&2
+		echo "" >&2
+		#echo "Use 's3simple --help' for usage information" >&2
+		usage >&2
 		return 1
 		;;
 	esac
@@ -223,5 +260,10 @@ s3simple() {
 		curl "${args[@]}" -s -f "$url"
 	fi
 }
+
+if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+	usage
+	exit 0
+fi
 
 s3simple "$@"
